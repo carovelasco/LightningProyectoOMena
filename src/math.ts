@@ -163,3 +163,66 @@ export const mat4 = {
     return m;
   },
 };
+
+
+//ARCBALL CONTROLS--------------
+
+// ── Quaternion helpers for arcball ──────────────────────────────
+export type Quat = [number, number, number, number]; // [x, y, z, w]
+
+export const quat = {
+  identity(): Quat {
+    return [0, 0, 0, 1];
+  },
+
+  multiply(p: Quat, q: Quat): Quat {
+    const [px, py, pz, pw] = p;
+    const [qx, qy, qz, qw] = q;
+    return [
+      pw*qx + px*qw + py*qz - pz*qy,
+      pw*qy - px*qz + py*qw + pz*qx,
+      pw*qz + px*qy - py*qx + pz*qw,
+      pw*qw - px*qx - py*qy - pz*qz,
+    ];
+  },
+
+  normalize(q: Quat): Quat {
+    const len = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+    return [q[0]/len, q[1]/len, q[2]/len, q[3]/len];
+  },
+
+  toMat4(q: Quat): Mat4 {
+    const [x, y, z, w] = q;
+    const m = new Float32Array(16);
+    m[0]  = 1 - 2*(y*y + z*z); m[4]  = 2*(x*y - z*w); m[8]  = 2*(x*z + y*w); m[12] = 0;
+    m[1]  = 2*(x*y + z*w);     m[5]  = 1 - 2*(x*x + z*z); m[9]  = 2*(y*z - x*w); m[13] = 0;
+    m[2]  = 2*(x*z - y*w);     m[6]  = 2*(y*z + x*w); m[10] = 1 - 2*(x*x + y*y); m[14] = 0;
+    m[3]  = 0;                  m[7]  = 0;              m[11] = 0;              m[15] = 1;
+    return m;
+  },
+};
+
+export function screenToSphere(nx: number, ny: number): [number, number, number] {
+  const dist = nx*nx + ny*ny;
+  if (dist <= 1.0) return [nx, ny, Math.sqrt(1.0 - dist)];
+  const scale = 1.0 / Math.sqrt(dist);
+  return [nx * scale, ny * scale, 0];
+}
+
+export function arcballRotation(from: [number,number,number], to: [number,number,number]): Quat {
+  const cosAngle = Math.min(1, from[0]*to[0] + from[1]*to[1] + from[2]*to[2]);
+  const angle = Math.acos(cosAngle);
+  if (angle < 1e-6) return quat.identity();
+
+  const axis: [number,number,number] = [
+    from[1]*to[2] - from[2]*to[1],
+    from[2]*to[0] - from[0]*to[2],
+    from[0]*to[1] - from[1]*to[0],
+  ];
+  const axisLen = Math.hypot(axis[0], axis[1], axis[2]);
+  if (axisLen < 1e-10) return quat.identity();
+
+  const half = angle * 0.5;
+  const sinHalf = Math.sin(half) / axisLen;
+  return quat.normalize([axis[0]*sinHalf, axis[1]*sinHalf, axis[2]*sinHalf, Math.cos(half)]);
+}

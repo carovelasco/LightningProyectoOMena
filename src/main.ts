@@ -3,12 +3,11 @@
 import "./style.css";
 import shaderCode from "./shader.wgsl?raw";
 import { Camera } from "./camera";
-import { mat4 } from "./math";
-import type { Vec3 } from "./math";
+import { mat4, quat, screenToSphere, arcballRotation } from "./math";
+import type { Vec3, Quat  } from "./math";
 import { gui, hexToRgb, initGUI, addObject, getSelectedIndex } from "./gui";
 
-// Vertex stride: [x,y,z, nx,ny,nz, bx,by,bz, u,v] — 11 floats = 44 bytes
-// Barycentric coords per corner so wireframe mode can detect edges in the shader
+
 const BARY: [number,number,number][] = [[1,0,0],[0,1,0],[0,0,1]];
  
 // OBJ loader — returns a flat (non-indexed) vertex array and bounding sphere info
@@ -194,7 +193,6 @@ function generateSphere(stacks: number, slices: number): { vd: Float32Array; id:
 let activeShape: "cube" | "sphere" = "cube";
 let meshCenter: [number,number,number] = [0,0,0];
 
-
 function buildVertexBuffer(shape: "cube" | "sphere"): { buf: GPUBuffer; count: number } {
   meshCenter = [0,0,0];
 
@@ -208,7 +206,7 @@ function buildVertexBuffer(shape: "cube" | "sphere"): { buf: GPUBuffer; count: n
   return { buf, count };
 }
 
-let { buf: vertexBuffer, count: vertexCount } = buildVertexBuffer("cube");
+//let { buf: vertexBuffer, count: vertexCount } = buildVertexBuffer("cube");
 
 
 // Uniform buffer  structure
@@ -263,6 +261,9 @@ const pipeline = device.createRenderPipeline({
   depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
 });
 
+// Camera
+const camera = new Camera();
+camera.position = [0, 0, 5];
 
 // ── Scene list
 
@@ -273,15 +274,16 @@ class MeshObject {
   uniformBuf:   GPUBuffer;
   bindGroup:    GPUBindGroup;
   transform = { tx:0, ty:0, tz:0, rx:0, ry:0, rz:0, sx:1, sy:1, sz:1 };
-
+  boundingRadius: number = 1;
  
   private _uab  = new ArrayBuffer(UNIFORM_SIZE);
   private _uf32 = new Float32Array(this._uab);
   private _uu32 = new Uint32Array(this._uab);
  
-  constructor(verts: Float32Array, count: number, center: [number,number,number] = [0,0,0]) {
+  constructor(verts: Float32Array, count: number, center: [number,number,number] = [0,0,0], radius = 1) {
     this.drawCount = count;
-    this.center    = center;
+    this.center    = center;          // local-space bounding centre
+    this.boundingRadius = radius;
  
     this.vertexBuffer = device.createBuffer({
       size: verts.byteLength,
@@ -299,6 +301,33 @@ class MeshObject {
       entries: [{ binding: 0, resource: { buffer: this.uniformBuf } }],
     });
   }
+  // Arcball state
+  arcballBase: Quat = quat.identity();      
+  arcballDrag: Quat = quat.identity();      
+  arcballDragStart: [number,number,number] | null = null;
+
+  getArcballMatrix(): Mat4 {
+    const combined = quat.normalize(quat.multiply(this.arcballDrag, this.arcballBase));
+    return quat.toMat4(combined);
+  }
+
+  worldCenter(): [number,number,number] {
+    return [this.transform.tx, this.transform.ty, this.transform.tz];
+  }
+
+  //for arcball
+  buildModel(): Mat4 {
+    const [cx, cy, cz] = this.center;
+ 
+    const toOrigin   = mat4.translation(-cx, -cy, -cz);
+    const rotation   = this.getArcballMatrix();
+    const scale      = mat4.scaling(this.transform.sx, this.transform.sy, this.transform.sz);
+    const userOffset = mat4.translation(this.transform.tx, this.transform.ty, this.transform.tz);
+     return mat4.multiply(
+      userOffset,
+      mat4.multiply(rotation, mat4.multiply(scale, toOrigin))
+    );
+  }
  
   uploadUniforms(
     proj: Float32Array, view: Float32Array, t: number,
@@ -307,8 +336,9 @@ class MeshObject {
     or: number, og: number, ob: number,
   ) {
     const [cx, cy, cz] = this.center;
-    const model = mat4.multiply(
-    mat4.translation(this.transform.tx - cx, this.transform.ty - cy, this.transform.tz - cz),mat4.identity());
+    const model  = this.buildModel();
+    //const model = mat4.multiply(
+    //mat4.translation(this.transform.tx - cx, this.transform.ty - cy, this.transform.tz - cz),mat4.identity());
     const normM = mat4.normalMatrix(model);
     const mvp   = mat4.multiply(mat4.multiply(proj, view), model);
  
@@ -341,18 +371,63 @@ const sceneObjects: MeshObject[] = [];
 initGUI(shape => {
   const { vd, id } = shape === "cube" ? generateCube() : generateSphere(64, 64);
   const { verts, count } = expandToFlat(vd, id);
-  const obj = new MeshObject(verts, count, [0,0,0]);
-  obj.transform.tx = (sceneObjects.length - (sceneObjects.length % 2 === 0 ? 0 : 1)) * 2.5 * (sceneObjects.length % 2 === 0 ? 1 : -1);
-  //obj.transform.tx = sceneObjects.length * 5.0;//Separate object but with more static distance
+  const obj = new MeshObject(verts, count, [0,0,0],1);
+  obj.transform.tx = (sceneObjects.length % 2 === 0 ? 1 : -1) * Math.ceil(sceneObjects.length / 2) * 2.5;
   sceneObjects.push(obj);
 });
+
+// ── Arcball mouse controls-car
+function toNDC(clientX: number, clientY: number): [number, number] {
+  const rect = canvas.getBoundingClientRect();
+  return [
+    ((clientX - rect.left) / rect.width)  *  2 - 1,
+   -((clientY - rect.top)  / rect.height) *  2 + 1,
+  ];
+}
+
+canvas.addEventListener("mousedown", e => {
+  if (e.button !== 0) return;
+  const activeObj = (window as any).__getSelectedObject() as MeshObject | null;
+  if (!activeObj) return;
+  const [nx, ny] = toNDC(e.clientX, e.clientY);
+  activeObj.arcballDragStart = screenToSphere(nx, ny);
+  activeObj.arcballDrag      = quat.identity();
+});
+
+canvas.addEventListener("mousemove", e => {
+  const activeObj = (window as any).__getSelectedObject() as MeshObject | null;
+  if (!activeObj || !activeObj.arcballDragStart) return;
+  const [nx, ny] = toNDC(e.clientX, e.clientY);
+  const current  = screenToSphere(nx, ny);
+  activeObj.arcballDrag = arcballRotation(activeObj.arcballDragStart, current);
+});
+
+canvas.addEventListener("mouseup", () => {
+  const activeObj = (window as any).__getSelectedObject() as MeshObject | null;
+  if (!activeObj || !activeObj.arcballDragStart) return;
+  // Mouse_Release: last = current * last, reset current
+  activeObj.arcballBase      = quat.normalize(quat.multiply(activeObj.arcballDrag, activeObj.arcballBase));
+  activeObj.arcballDrag      = quat.identity();
+  activeObj.arcballDragStart = null;
+});
+
+canvas.addEventListener("mouseleave", () => {
+  const activeObj = (window as any).__getSelectedObject() as MeshObject | null;
+  if (!activeObj) return;
+  activeObj.arcballBase      = quat.normalize(quat.multiply(activeObj.arcballDrag, activeObj.arcballBase));
+  activeObj.arcballDrag      = quat.identity();
+  activeObj.arcballDragStart = null;
+});
+
+
+
+
 
 //defalt cube
 {
   const { vd, id } = generateCube();
   const { verts, count } = expandToFlat(vd, id);
-  const obj = new MeshObject(verts, count, [0,0,0]);
-  obj.transform.tx = 0;
+  const obj = new MeshObject(verts, count, [0,0,0],1);
   sceneObjects.push(obj);
 }
 
@@ -370,8 +445,10 @@ document.getElementById("obj-file-input")?.addEventListener("change", async (e) 
   const { verts, count, cx, cy, cz, radius } = parseOBJ(await file.text());
   addObject(file.name.replace(".obj", ""));
 
-  const obj = new MeshObject(verts, count, [cx, cy, cz]);
-  obj.transform.tx = sceneObjects.length * 5.0;
+  const obj = new MeshObject(verts, count, [cx, cy, cz],radius);
+  obj.transform.tx = 0;
+  obj.transform.ty = 0;
+  obj.transform.tz = 0;
   sceneObjects.push(obj);
 
   camera.position = [0, cy, radius * 2.5]; 
@@ -384,9 +461,6 @@ document.getElementById("obj-file-input")?.addEventListener("change", async (e) 
 });
 
 
-// Camera
-const camera = new Camera();
-camera.position = [0, 0, 5];
 const keys = new Set<string>();
 window.addEventListener("keydown", e => keys.add(e.key));
 window.addEventListener("keyup",   e => keys.delete(e.key));
@@ -408,9 +482,8 @@ function frame(now: number) {
 
   const selObj = (window as any).__getSelectedObject() as MeshObject | null;
   const target: [number,number,number] = selObj
-  ? [selObj.transform.tx, selObj.transform.ty, selObj.transform.tz]
-  : [0, 0, 0];
-    
+    ? selObj.worldCenter()
+    : [0, 0, 0];    
 
   const view = mat4.lookAt(camera.position, target, [0, 1, 0]);
 
@@ -422,22 +495,18 @@ function frame(now: number) {
   if (gui.autoRotLight) {
     lx = Math.cos(t * 0.8) * 4.5;
     lz = Math.sin(t * 0.8) * 4.5;
-    //updateLightDisplay(lx, lz); THAT IS NOT ANYMORE IN THE FINAL VERSION ACCORIDIGN TO THE EXAMPLE 
   }
 
   const [or, og, ob] = hexToRgb(gui.objectColor);
   const [lr, lg, lb] = hexToRgb(gui.lightColor);
 
-  uData.set(mvp,   0);
-  uData.set(model, 16);
-  uData.set(normM, 32);
+  uData.set(mvp,   0); uData.set(model, 16);  uData.set(normM, 32);
   uData[48] = lx;          uData[49] = ly;          uData[50] = lz; uData[51] = 0;
   uData[52] = lr;          uData[53] = lg;           uData[54] = lb; uData[55] = 0;
   uData[56] = gui.ambient; uData[57] = gui.diffuse;  uData[58] = gui.specular; uData[59] = gui.shininess;
   uData[60] = camera.position[0]; uData[61] = camera.position[1]; uData[62] = camera.position[2];
   uData32[63] = gui.modelId;//<-must be u32 bits
-  uData[64] = or; uData[65] = og; uData[66] = ob;
-  uData[67] = t;
+  uData[64] = or; uData[65] = og; uData[66] = ob;  uData[67] = t;
 
   device.queue.writeBuffer(uniformBuffer, 0, uArrayBuf);
 

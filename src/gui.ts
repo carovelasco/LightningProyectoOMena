@@ -2,7 +2,7 @@
 
 // Shared GUI state  (read by the render loop in main.ts)
 export const gui = {
-  modelId:      0,
+  modelId:      1,
   ambient:      0.12,
   diffuse:      0.75,
   specular:     0.60,
@@ -10,7 +10,7 @@ export const gui = {
   lightX:       3.0,
   lightY:       4.0,
   lightZ:       3.0,
-  autoRotLight: true,
+  autoRotLight: false,// changed to false while i was working
   objectColor:  "#4a9eff",
   lightColor:   "#ffffff",
 
