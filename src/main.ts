@@ -5,10 +5,7 @@ import shaderCode from "./shader.wgsl?raw";
 import { Camera } from "./camera";
 import { mat4 } from "./math";
 import type { Vec3 } from "./math";
-import { gui, hexToRgb, initGUI, addObject} from "./gui";
-
-//FIRST AND SECOND INSTRUCTION-caro
-
+import { gui, hexToRgb, initGUI, addObject, getSelectedIndex } from "./gui";
 
 // Vertex stride: [x,y,z, nx,ny,nz, bx,by,bz, u,v] — 11 floats = 44 bytes
 // Barycentric coords per corner so wireframe mode can detect edges in the shader
@@ -19,10 +16,10 @@ function parseOBJ(text: string) {
   const pos: [number,number,number][] = [];
   const nrm: [number,number,number][] = [];
   const uvs: [number,number][]        = [];
-  const verts: number[] = [];
  
   // temp storage for triangles before we know if normals exist
-  type Tri = [[number,number,number],[number,number,number],[number,number]][];
+  type Corner = [[number,number,number],[number,number,number],[number,number]][];
+  type Tri = [Corner, Corner, Corner];
   const tris: Tri[] = [];
   let hasNormals = false;
  
@@ -46,10 +43,10 @@ function parseOBJ(text: string) {
         const ui = t.length > 1 && t[1] !== "" ? resolve(t[1], uvs.length)  : -1;
         const ni = t.length > 2 && t[2] !== "" ? resolve(t[2], nrm.length)  : -1;
         return [
-          pos[pi] ?? [0,0,0] as [number,number,number],
-          ni >= 0 ? nrm[ni] : [0,1,0] as [number,number,number],
-          ui >= 0 ? uvs[ui] : [0,0]   as [number,number],
-        ] as [number,number,number][]; // typed loosely, fixed below
+          pos[pi] ?? [0,0,0] ,
+          ni >= 0 ? nrm[ni] : [0,1,0],
+          ui >= 0 ? uvs[ui] : [0,0] ,
+        ] as unknown as Corner; // typed loosely, fixed below
       });
       // fan triangulation — works for tris and quads
       for (let i = 1; i + 1 < corners.length; i++)
@@ -82,6 +79,7 @@ function parseOBJ(text: string) {
   }
  
   // pack into flat vertex buffer
+  const verts: number[] = [];
   for (const tri of tris as any)
     for (let i = 0; i < 3; i++) {
       const [p, n, uv] = tri[i];
@@ -106,8 +104,6 @@ function parseOBJ(text: string) {
   return { verts: new Float32Array(verts), count: verts.length/11, cx, cy, cz, radius };
 }
  
-
-
 
 
 
@@ -150,7 +146,7 @@ window.addEventListener("resize", resize);
 // Each face is 2 triangles
 // Normals are constant per face so flat and smooth shading look identical on a cube.
 
-function generateCube(): Float32Array {
+function generateCube(): { vd: Float32Array; id: Uint32Array } {
   const faces: Array<{ n: Vec3; verts: number[][] }> = [
     { n: [ 0,  0,  1], verts: [[-1,-1, 1,0,1],[1,-1, 1,1,1],[1, 1, 1,1,0],[-1,-1, 1,0,1],[1, 1, 1,1,0],[-1, 1, 1,0,0]] },
     { n: [ 0,  0, -1], verts: [[ 1,-1,-1,0,1],[-1,-1,-1,1,1],[-1, 1,-1,1,0],[1,-1,-1,0,1],[-1, 1,-1,1,0],[1, 1,-1,0,0]] },
@@ -192,7 +188,6 @@ function generateSphere(stacks: number, slices: number): { vd: Float32Array; id:
   }
   return { vd: new Float32Array(verts), id: new Uint32Array(idx) };
 }
-
 
 
 // Geometry buffers — rebuilt when the user switches shape
@@ -268,14 +263,8 @@ const pipeline = device.createRenderPipeline({
   depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
 });
 
-const bindGroup = device.createBindGroup({
-  layout: pipeline.getBindGroupLayout(0),
-  entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
-});
-
 
 // ── Scene list
-
 
 class MeshObject {
   vertexBuffer: GPUBuffer;
@@ -283,6 +272,8 @@ class MeshObject {
   center:       [number,number,number];
   uniformBuf:   GPUBuffer;
   bindGroup:    GPUBindGroup;
+  transform = { tx:0, ty:0, tz:0, rx:0, ry:0, rz:0, sx:1, sy:1, sz:1 };
+
  
   private _uab  = new ArrayBuffer(UNIFORM_SIZE);
   private _uf32 = new Float32Array(this._uab);
@@ -316,7 +307,8 @@ class MeshObject {
     or: number, og: number, ob: number,
   ) {
     const [cx, cy, cz] = this.center;
-    const model = mat4.translation(-cx, -cy, -cz);
+    const model = mat4.multiply(
+    mat4.translation(this.transform.tx - cx, this.transform.ty - cy, this.transform.tz - cz),mat4.identity());
     const normM = mat4.normalMatrix(model);
     const mvp   = mat4.multiply(mat4.multiply(proj, view), model);
  
@@ -344,43 +336,51 @@ class MeshObject {
   //list
 const sceneObjects: MeshObject[] = [];
 
+(window as any).__getSelectedObject = () => sceneObjects[getSelectedIndex()] ?? null;
 // GUI----------------------------------------------------------------------------------------------INIT GUI--------------------------------------------
 initGUI(shape => {
   const { vd, id } = shape === "cube" ? generateCube() : generateSphere(64, 64);
   const { verts, count } = expandToFlat(vd, id);
-  sceneObjects.push(new MeshObject(verts, count, [0,0,0]));
-
+  const obj = new MeshObject(verts, count, [0,0,0]);
+  obj.transform.tx = (sceneObjects.length - (sceneObjects.length % 2 === 0 ? 0 : 1)) * 2.5 * (sceneObjects.length % 2 === 0 ? 1 : -1);
+  //obj.transform.tx = sceneObjects.length * 5.0;//Separate object but with more static distance
+  sceneObjects.push(obj);
 });
 
-//for obj -------------------------
-(window as any).__onObjectRemoved = (index) => {
-  vertexBuffer.destroy();
-  vertexBuffer = device.createBuffer({ 
-    size: 4,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST 
-  });
-  vertexCount = 0;
-  meshCenter = [0, 0, 0];
+//defalt cube
+{
+  const { vd, id } = generateCube();
+  const { verts, count } = expandToFlat(vd, id);
+  const obj = new MeshObject(verts, count, [0,0,0]);
+  obj.transform.tx = 0;
+  sceneObjects.push(obj);
+}
+
+(window as any).__onObjectRemoved = (index: number) => {//Called by gui.ts deleteSelected()
+  if (index >= 0 && index < sceneObjects.length) {
+    sceneObjects[index].destroy();
+    sceneObjects.splice(index, 1);
+  }
 };
 
+//for obj -------------------------
 document.getElementById("obj-file-input")?.addEventListener("change", async (e) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
   const { verts, count, cx, cy, cz, radius } = parseOBJ(await file.text());
   addObject(file.name.replace(".obj", ""));
 
-  vertexBuffer.destroy();
-  vertexBuffer = device.createBuffer({ size: verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-  device.queue.writeBuffer(vertexBuffer, 0, verts);
-  vertexCount = count;
- 
-  // center mesh at origin, place camera so the whole object is visible
-  meshCenter = [cx, cy, cz];
-  camera.position = [0, 0, radius * 2.5]; //center camara in obj
+  const obj = new MeshObject(verts, count, [cx, cy, cz]);
+  obj.transform.tx = sceneObjects.length * 5.0;
+  sceneObjects.push(obj);
+
+  camera.position = [0, cy, radius * 2.5]; 
   camera.yaw   = -Math.PI / 2;
   camera.pitch = 0;
  
   console.log(`${file.name}: ${count/3} tris, centre=[${cx.toFixed(1)},${cy.toFixed(1)},${cz.toFixed(1)}], r=${radius.toFixed(1)}`);
+  (e.target as HTMLInputElement).value = "";
+
 });
 
 
@@ -404,8 +404,16 @@ function frame(now: number) {
   camera.update(keys, dt);
 
   const aspect = canvas.width / canvas.height;
-  const proj   = mat4.perspective((60 * Math.PI) / 180, aspect, 0.1, 1000);//1000 instead 0f 100 so it fits
-  const view   = camera.getViewMatrix();
+  const proj   = mat4.perspective((60 * Math.PI) / 180, aspect, 0.1, 1500);//1500 instead 0f 100 so it fits
+
+  const selObj = (window as any).__getSelectedObject() as MeshObject | null;
+  const target: [number,number,number] = selObj
+  ? [selObj.transform.tx, selObj.transform.ty, selObj.transform.tz]
+  : [0, 0, 0];
+    
+
+  const view = mat4.lookAt(camera.position, target, [0, 1, 0]);
+
   const model  = mat4.translation(-meshCenter[0], -meshCenter[1], -meshCenter[2]);//c
   const normM  = mat4.normalMatrix(model);
   const mvp    = mat4.multiply(mat4.multiply(proj, view), model);
@@ -458,6 +466,7 @@ function frame(now: number) {
   device.queue.submit([encoder.finish()]);
   requestAnimationFrame(frame);
 }
+
 
 //caro
 // Expands indexed 8-float geometry to 11-float vertices with barycentric coords

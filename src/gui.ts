@@ -340,3 +340,6 @@ export function initGUI(onShapeChange: (shape: "cube" | "sphere") => void) {
     addObject("Cube");
 
 }
+export function getSelectedIndex(): number {
+  return sceneObjects.findIndex(o => o.id === selectedId);
+}
