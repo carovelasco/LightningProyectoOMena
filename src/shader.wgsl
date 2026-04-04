@@ -63,6 +63,8 @@ struct VSOut {
   @location(2) uv            : vec2<f32>,
   @location(3) gouraudColor  : vec3<f32>,
   @location(4) barycentric   : vec3<f32>,
+  @location(5) depth: f32,
+
 };
 
 fn gouraudLighting(N: vec3<f32>, vertWorldPos: vec3<f32>) -> vec3<f32> {
@@ -128,6 +130,8 @@ fn vs_main(input: VSIn) -> VSOut {
   out.worldNormal = normalize(worldNormal4.xyz);
   out.uv          = input.uv;
   out.barycentric = input.barycentric;
+  out.depth = out.clipPos.z / out.clipPos.w;
+
 
   if u.model_id == 0u {
     out.gouraudColor = gouraudLighting(out.worldNormal, out.worldPos);
@@ -168,8 +172,8 @@ fn fs_main(input: VSOut) -> @location(0) vec4<f32> {
       color = mix(wireColor, fillColor, edgeFactor);
     }
     case 4u: {
-      let ndcDepth = input.clipPos.z / input.clipPos.w;
-      color = vec3<f32>(ndcDepth);
+      let d = (input.depth + 1.0) * 0.5;
+      color = vec3<f32>(d);
     }
     case 5u: {
       let tc = textureSample(tex_img, tex_samp, input.uv).rgb;

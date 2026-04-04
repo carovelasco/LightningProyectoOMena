@@ -315,14 +315,32 @@ export function initGUI(onShapeChange: (shape: "cube" | "sphere") => void) {
   // Sliders
  
   (["translateX", "translateY", "translateZ", "rotateX", "rotateY", "rotateZ", "scaleX", "scaleY", "scaleZ"] as const).forEach(id => {
-    const el = document.getElementById(id) as HTMLInputElement | null;
-    const valEl = document.getElementById(`${id}-val`);
-    if (!el || !valEl) return;
-    el.addEventListener("input", () => {
-      (gui as Record<string, number | string | boolean>)[id] = parseFloat(el.value);
-      valEl.textContent = el.value;
-    });
+  const el = document.getElementById(id) as HTMLInputElement | null;
+  const valEl = document.getElementById(`${id}-val`);
+  if (!el || !valEl) return;
+  el.addEventListener("input", () => {
+    const val = parseFloat(el.value);
+    valEl.textContent = el.value;
+    (gui as Record<string, number | string | boolean>)[id] = val;
+
+    const obj = (window as any).__getSelectedObject?.();
+    if (!obj?.transform) return;
+
+    const map: Record<string, string> = {
+      translateX: "tx", translateY: "ty", translateZ: "tz",
+      rotateX: "rx",    rotateY: "ry",    rotateZ: "rz",
+      scaleX: "sx",     scaleY: "sy",     scaleZ: "sz",
+    };
+    const key = map[id];
+    if (!key) return;
+
+    if (id.startsWith("rotate")) {
+      (obj.transform as Record<string, number>)[key] = val * Math.PI / 180;
+    } else {
+      (obj.transform as Record<string, number>)[key] = val;
+    }
   });
+});
 
   (["ambient", "diffuse", "specular", "shininess"] as const).forEach(id => {
     const el = document.getElementById(id) as HTMLInputElement | null;

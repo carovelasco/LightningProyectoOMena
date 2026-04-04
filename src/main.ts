@@ -371,9 +371,19 @@ class MeshObject {
   //for arcball
   buildModel(): Mat4 {
     const [cx, cy, cz] = this.center;
- 
     const toOrigin   = mat4.translation(-cx, -cy, -cz);
-    const rotation   = this.getArcballMatrix();
+
+    //for sliders to work ttoo
+    const sliderRot = mat4.multiply(
+        mat4.rotationZ(this.transform.rz),
+        mat4.multiply(
+          mat4.rotationY(this.transform.ry),
+          mat4.rotationX(this.transform.rx)
+        )
+      );
+    const arcRot = this.getArcballMatrix();
+    const rotation = mat4.multiply(arcRot, sliderRot);
+
     const scale      = mat4.scaling(this.transform.sx, this.transform.sy, this.transform.sz);
     const userOffset = mat4.translation(this.transform.tx, this.transform.ty, this.transform.tz);
      return mat4.multiply(
@@ -598,6 +608,11 @@ function frame(now: number) {
   if (gui.autoRotLight) {
     lx = Math.cos(t * 0.8) * 4.5;
     lz = Math.sin(t * 0.8) * 4.5;
+  } else {
+    const cp = camera.getPosition();
+    lx = cp[0];
+    ly = cp[1] + 4.0;   // above the camera for punto 7 of shading
+    lz = cp[2];
   }
 
   //const [or, og, ob] = hexToRgb(gui.objectColor);
